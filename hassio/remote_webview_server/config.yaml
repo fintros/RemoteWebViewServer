@@ -1,7 +1,7 @@
-name: "Remote WebView Server"
+name: "CrowPanel Home Assistant WebView"
 version: "1.2.1"
 slug: "remote_webview_server"
-description: "Streams your HA dashboard or any website to ESP32-based displays as tiles via WebSocket."
+description: "Streams your HA dashboard or any website to ESP32P4 CrowPanel via WebSocket."
 url: "https://github.com/fintros/RemoteWebViewServer/tree/main/hassio/remote_webview_server"
 arch:
   - amd64
@@ -22,14 +22,14 @@ map:
     read_only: false
 
 options:
-  tile_size: 32
+  tile_size: 256
   full_frame_tile_count: 4
   full_frame_area_threshold: 0.5
   full_frame_every: 50
   every_nth_frame: 1
   min_frame_interval_ms: 80
   jpeg_quality: 85
-  max_bytes_per_message: 61440
+  max_bytes_per_message: 122880
   ws_port: 8081
   debug_port: 9221
   expose_debug_proxy: false
