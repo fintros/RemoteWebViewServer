@@ -1,4 +1,4 @@
-ARG SERVER_IMAGE=docker.io/strangev/remote-webview-server:latest
+ARG SERVER_IMAGE=docker.io/fintros/remote-webview-server:latest
 FROM ${SERVER_IMAGE}
 
 USER root
