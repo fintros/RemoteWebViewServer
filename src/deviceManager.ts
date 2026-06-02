@@ -228,6 +228,103 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       newDevice.url = url;
       broadcaster.sendCurrentURL(newDevice.deviceId, url);
       console.log(`[device] URL changed to: ${url}`);
+
+      // ================= АВТОЛОГИН =================
+      if (url.includes('/auth/authorize')) {
+        if (!cfg.haUser || !cfg.haPass) {
+          console.log(`[device] Login page detected, but haUser/haPass is missing in config!`);
+          return;
+        }
+
+        console.log(`[device] Detected HA login page. Injecting credentials via deep CDP...`);
+
+        // Ждем 5 секунд, пока HA полностью загрузится и поставит фокус в поле username
+        setTimeout(async () => {
+          console.log("[device] Starting xdotool-style CDP auto-login sequence...");
+
+          try {
+            // Вспомогательная функция для эмуляции ввода текста
+            const typeText = async (text: string) => {
+              for (const char of text) {
+                await session.send('Input.dispatchKeyEvent', {
+                  type: 'char',
+                  text: char
+                });
+                await new Promise(r => setTimeout(r, 20)); // Небольшая пауза между символами
+              }
+            };
+
+            // Вспомогательная функция для нажатия спецклавиш
+            const pressKey = async (key: string, code: string, keyIdentifier: string) => {
+              await session.send('Input.dispatchKeyEvent', {
+                type: 'keyDown',
+                key: key,
+                code: code,
+                keyIdentifier: keyIdentifier
+              });
+              await new Promise(r => setTimeout(r, 50));
+              await session.send('Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: key,
+                code: code,
+                keyIdentifier: keyIdentifier
+              });
+              await new Promise(r => setTimeout(r, 100));
+            };
+
+            // Шаг 1: Печатаем логин (фокус уже там по умолчанию)
+            console.log("[device] Typing username...");
+            await typeText(cfg.haUser);
+            await new Promise(r => setTimeout(r, 200));
+
+            // Шаг 2: Нажимаем Tab для перехода к паролю
+            console.log("[device] Pressing Tab...");
+            await pressKey('Tab', 'Tab', 'U+0009');
+            await new Promise(r => setTimeout(r, 200));
+
+            // Шаг 3: Печатаем пароль
+            console.log("[device] Typing password...");
+            await typeText(cfg.haPass);
+            await new Promise(r => setTimeout(r, 500));
+
+            // Шаг 4: Нажимаем Tab, чтобы перейти к кнопке "Войти" (Submit)
+            console.log("[device] Pressing Tab to reach Submit button...");
+            await pressKey('Tab', 'Tab', 'U+0009');
+            await pressKey('Tab', 'Tab', 'U+0009');
+            await pressKey('Tab', 'Tab', 'U+0009');
+            await pressKey('Tab', 'Tab', 'U+0009');
+            await new Promise(r => setTimeout(r, 300));
+
+            // Шаг 5: Нажимаем Enter (или Пробел) прямо на кнопке
+            console.log("[device] Pressing Enter to submit...");
+            // Для кнопок Material Web Components (mwc-button) часто лучше работает пробел или явный keyDown на Enter
+            await pressKey('Enter', 'Enter', 'Enter');
+            // На всякий случай дублируем пробелом, если кнопка не отреагировала на Enter
+            await pressKey(' ', 'Space', 'U+0020'); 
+
+            console.log("[device] Credentials injected via CDP keystrokes. Waiting for redirect...");
+
+            // Шаг 5: Перезапускаем скринкаст, так как страница должна обновиться
+            setTimeout(async () => {
+                await session.send('Page.stopScreencast').catch(() => {});
+                await session.send('Page.startScreencast', {
+                  format: 'png',
+                  maxWidth: cfg.width,
+                  maxHeight: cfg.height,
+                  everyNthFrame: cfg.everyNthFrame
+                }).catch(() => {});
+
+                newDevice.processor.requestFullFrame();
+            }, 5000); // Ждем 5 секунд на авторизацию и загрузку дашборда
+
+          } catch (e: any) {
+            console.error(`[device] CDP xdotool-style login failed:`, e);
+          }
+        }, 5000); // Ждем 5 секунд после начала загрузки URL
+
+      }
+      // ================= КОНЕЦ АВТОЛОГИНА =================
+
     }
   };
 

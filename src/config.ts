@@ -13,6 +13,8 @@ export type DeviceConfig = {
   jpegQuality: number;              // 1..100
   maxBytesPerMessage: number;       // bytes (>0)
   rotation: Rotation;               // degrees
+  haUser: string;
+  haPass: string;
 };
 
 export type InjectScriptConfig = {
@@ -123,6 +125,9 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
 
   const dimensions = getRotatedDimensions(width, height, rotation);
 
+  const user = params.get("u") || "";
+  const password = params.get("p") || "";
+
   return {
     height: dimensions.height,
     width: dimensions.width,
@@ -135,6 +140,8 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     jpegQuality,
     maxBytesPerMessage,
     rotation,
+    haUser: user,
+    haPass: password
   };
 }
 
