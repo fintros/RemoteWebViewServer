@@ -30,6 +30,12 @@ async function startHeadlessIfNeededAsync(): Promise<void> {
     '--no-sandbox',
     '--force-device-scale-factor=1',
     '--headless=new',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-dev-shm-usage',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
     ...(PREFERS_REDUCED_MOTION ? ['--force-prefers-reduced-motion'] : []),
   ];
 

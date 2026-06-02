@@ -33,14 +33,37 @@ let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
 
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
+
   const root = getRoot();
   if (!root) throw new Error("CDP not ready");
 
   let device = devices.get(id);
+  
+  let sessionIsAlive = false;
   if (device) {
+      try {
+          await device.cdp.send('Browser.getVersion'); // Простой пинг
+          sessionIsAlive = true;
+      } catch (e) {
+          console.warn(`[device] CDP session for ${id} is dead. Recreating.`);
+          await deleteDeviceAsync(device);
+          device = undefined;
+      }
+  }
+
+  if (device && sessionIsAlive) {
     if (deviceConfigsEqual(device.cfg, cfg)) {
       device.lastActive = Date.now();
+      device.prevFrameHash = 0; 
       device.processor.requestFullFrame();
+      
+      await device.cdp.send('Page.startScreencast', {
+        format: 'png',
+        maxWidth: cfg.width,
+        maxHeight: cfg.height,
+        everyNthFrame: cfg.everyNthFrame
+      }).catch(e => console.error("Failed to restart screencast", e));
+
       return device;
     } else {
       console.log(`[device] Reconfiguring device ${id}`);
@@ -48,16 +71,49 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     }
   }
 
-  const { targetId } = await root.send<{ targetId: string }>('Target.createTarget', {
-    url: 'about:blank',
-    width: cfg.width,
-    height: cfg.height,
-  });
+
+    const { targetInfos } = await root.send<{targetInfos: any[]}>('Target.getTargets');
+  
+  const mainPages = targetInfos.filter(t => 
+      t.type === 'page' && 
+      !t.openerId && 
+      (!t.targetId.includes('iframe') && !t.url.includes('worker'))
+  );
+
+  let targetId: string;
+
+  if (mainPages.length > 0) {
+    const haPage = mainPages.find(t => t.url.includes(':8123'));
+    
+    if (haPage) {
+        targetId = haPage.targetId;
+        console.log(`[device] Reusing Home Assistant tab: ${targetId}`);
+    } else {
+        targetId = mainPages[0].targetId;
+        console.log(`[device] Reusing empty tab: ${targetId}`);
+    }
+
+    for (const page of mainPages) {
+      if (page.targetId !== targetId) {
+        console.log(`[device] Killing extra main tab: ${page.targetId} (${page.url})`);
+        await root.send('Target.closeTarget', { targetId: page.targetId }).catch(() => {});
+      }
+    }
+  } else {
+    console.log(`[device] No main tabs found, creating a new one`);
+    const res = await root.send<{ targetId: string }>('Target.createTarget', {
+      url: 'about:blank',
+      width: cfg.width,
+      height: cfg.height,
+    });
+    targetId = res.targetId;
+  }
 
   const { sessionId } = await root.send<{ sessionId: string }>('Target.attachToTarget', {
     targetId,
     flatten: true
   });
+
   const session = (root as any).session(sessionId);
 
   await session.send('Page.enable');

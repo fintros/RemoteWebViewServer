@@ -30,6 +30,7 @@ export class InputRouter {
 
   public async handleOpenURLPacketAsync(dev: DeviceSession, buf: Buffer): Promise<void> {
     const pkt = parseOpenURLPacket(buf);
+    console.log('OpenURL received:', pkt?.url, '| dev.url:', dev.url, '| equal:', dev.url === pkt?.url);
       if (!pkt) return;
 
       if (pkt.url === "self-test") {
@@ -38,7 +39,25 @@ export class InputRouter {
         dev.selfTestRunner.stop();
         
         if (dev.url !== pkt.url)
+          // dev.url = '';
           await dev.cdp.send('Page.navigate', { url: pkt.url });
+        else
+        {
+          dev.prevFrameHash = 0;
+          dev.processor.requestFullFrame();
+          await dev.cdp.send('Page.setWebLifecycleState', { state: 'active' }).catch(()=>{});
+          await dev.cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(()=>{});
+          await dev.cdp.send('Page.bringToFront').catch(()=>{});
+          await dev.cdp.send('Page.stopScreencast').catch(()=>{});
+          await dev.cdp.send('Page.startScreencast', {
+              format: 'png',
+              maxWidth: dev.cfg.width,
+              maxHeight: dev.cfg.height,
+              everyNthFrame: dev.cfg.everyNthFrame
+          }).catch(()=>{});
+
+          dev.processor.requestFullFrame();
+        }
       }
   }
 

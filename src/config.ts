@@ -80,14 +80,14 @@ function readEnvFallbacks(): Partial<DeviceConfig> {
   const val = (name: string) => env.get(name).asString() ?? undefined;
 
   const out: Partial<DeviceConfig> = {};
-  const TS = val("TILE_SIZE");
-  const FFTC = val("FULL_FRAME_TILE_COUNT");
-  const FFAT = val("FULL_FRAME_AREA_THRESHOLD");
-  const FFE = val("FULL_FRAME_EVERY");
-  const ENF = val("EVERY_NTH_FRAME");
-  const MFI = val("MIN_FRAME_INTERVAL_MS");
-  const Q = val("JPEG_QUALITY");
-  const MBPM = val("MAX_BYTES_PER_MESSAGE");
+  const TS = val("256"); //val("TILE_SIZE");
+  const FFTC = val("4"); //val("FULL_FRAME_TILE_COUNT");
+  const FFAT = val("0.5"); //val("FULL_FRAME_AREA_THRESHOLD");
+  const FFE = val("50"); //val("FULL_FRAME_EVERY");
+  const ENF = val("1"); //val("EVERY_NTH_FRAME");
+  const MFI = val("80"); //val("MIN_FRAME_INTERVAL_MS");
+  const Q = val("85"); //val("JPEG_QUALITY");
+  const MBPM = val("122880"); // val("MAX_BYTES_PER_MESSAGE");
 
   if (TS) out.tileSize = intPos(TS)!;
   if (FFTC) out.fullFrameTileCount = intPos(FFTC)!;

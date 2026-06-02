@@ -3,7 +3,7 @@ import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
 import { hash32 } from "./util.js";
 
-sharp.concurrency(Math.max(1, os.cpus().length - 1));
+sharp.concurrency(Math.max(1, os.cpus().length - 2));
 
 export type RGBA = { data: Buffer; width: number; height: number };
 

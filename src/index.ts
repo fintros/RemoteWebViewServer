@@ -15,7 +15,7 @@ const inputRouter = new InputRouter();
 
 await bootstrapAsync();
 
-wss.on("connection", async (ws, req) => {
+wss.on("connection", (ws, req) => { 
   const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
   const id = url.searchParams.get("id") || "default";
 
@@ -24,32 +24,50 @@ wss.on("connection", async (ws, req) => {
   logDeviceConfig(id, cfg);
 
   broadcaster.addClient(id, ws);
-  const dev = await ensureDeviceAsync(id, cfg);
 
-  ws.on("message", (msg, isBinary) => {
+  const devPromise = ensureDeviceAsync(id, cfg);
+
+  // СРАЗУ ЖЕ вешаем слушатель, чтобы не пропустить ни одного байта
+  ws.on("message", async (msg, isBinary) => {
     if (!isBinary) return;
 
     const buf: Buffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
-    switch (buf.readUInt8(0)) {
-      case MsgType.Touch:
-        inputRouter.handleTouchPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
-        break;
-      case MsgType.Keepalive:
-        dev.lastActive = Date.now();
-        break;
-      case MsgType.FrameStats:
-        inputRouter.handleFrameStatsPacketAsync(dev, buf).catch(() => console.warn(`Failed to handle Self test packet`));
-        break;
-      case MsgType.OpenURL:
-        inputRouter.handleOpenURLPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle OpenURL packet: ${(e as Error).message}`));
-        break;
-    }
-  })
+    
+    try {
+      const dev = await devPromise;
 
-  ws.on("close", () => {
-    dev.lastActive = Date.now();
+      switch (buf.readUInt8(0)) {
+        case MsgType.Touch:
+          await inputRouter.handleTouchPacketAsync(dev, buf);
+          break;
+        case MsgType.Keepalive:
+          dev.lastActive = Date.now();
+          break;
+        case MsgType.FrameStats:
+          await inputRouter.handleFrameStatsPacketAsync(dev, buf);
+          break;
+        case MsgType.OpenURL:
+          await inputRouter.handleOpenURLPacketAsync(dev, buf);
+          break;
+      }
+    } catch (e) {
+      console.warn(`[ws] Failed to handle packet: ${(e as Error).message}`);
+    }
+  });
+
+  ws.on("close", async () => {
     broadcaster.removeClient(id, ws);
-  })
+    try {
+      const dev = await devPromise;
+      dev.lastActive = Date.now();
+    } catch (e) {
+    }
+  });
+
+ devPromise.catch((e) => {
+    console.error(`[device] Failed to ensure device ${id}:`, e);
+    ws.close(); // Закрываем сокет, если Хромиум умер
+  });
 });
 
 http.createServer(async (req, res) => {
