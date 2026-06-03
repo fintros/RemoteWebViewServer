@@ -43,7 +43,7 @@ export class InputRouter {
           await dev.cdp.send('Page.navigate', { url: pkt.url });
         else
         {
-          dev.prevFrameHash = 0;
+          //dev.prevFrameHash = 0;
           dev.processor.requestFullFrame();
           await dev.cdp.send('Page.setWebLifecycleState', { state: 'active' }).catch(()=>{});
           await dev.cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(()=>{});

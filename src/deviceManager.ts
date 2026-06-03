@@ -4,7 +4,6 @@ import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig } from "./conf
 import { getRoot } from "./cdpRoot.js";
 import { FrameProcessor } from "./frameProcessor.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
-import { hash32 } from "./util.js";
 import { SelfTestRunner } from "./selfTest.js";
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
 
@@ -16,7 +15,6 @@ export type DeviceSession = {
   url: string;
   lastActive: number;
   frameId: number;
-  prevFrameHash: number;
   processor: FrameProcessor;
   selfTestRunner: SelfTestRunner
 
@@ -31,6 +29,46 @@ const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_RED
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
+
+const ANTI_ANIMATION_SCRIPT = `
+  (function() {
+    const css = \`
+      * { 
+        animation: none !important; 
+        transition: none !important; 
+      }
+      input, textarea, [contenteditable="true"] {
+        caret-color: transparent !important;
+      }
+    \`;
+    
+    // 1. Применяем к обычному (Light) DOM
+    function injectToNode(node) {
+      if (node.querySelector('#rpi-anti-anim')) return;
+      const style = document.createElement('style');
+      style.id = 'rpi-anti-anim';
+      style.innerHTML = css;
+      // appendChild может не сработать моментально в shadow, поэтому используем prepend/append
+      if (node.prepend) node.prepend(style);
+      else node.appendChild(style);
+    }
+    
+    if (document.head) injectToNode(document.head);
+    
+    // 2. ХАК ДЛЯ HOME ASSISTANT: Перехватываем создание Shadow DOM
+    // Этот код внедрит наш CSS внутрь каждой карточки, кнопки и спиннера
+    if (!window.__shadowPatched) {
+      const originalAttachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function(init) {
+        const shadowRoot = originalAttachShadow.call(this, init);
+        injectToNode(shadowRoot);
+        return shadowRoot;
+      };
+      window.__shadowPatched = true;
+    }
+  })();
+`;
+
 
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
 
@@ -54,11 +92,10 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   if (device && sessionIsAlive) {
     if (deviceConfigsEqual(device.cfg, cfg)) {
       device.lastActive = Date.now();
-      device.prevFrameHash = 0; 
       device.processor.requestFullFrame();
       
       await device.cdp.send('Page.startScreencast', {
-        format: 'png',
+        format: 'png', // Если процессор успевает, иначе 'jpeg'
         maxWidth: cfg.width,
         maxHeight: cfg.height,
         everyNthFrame: cfg.everyNthFrame
@@ -71,8 +108,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     }
   }
 
-
-    const { targetInfos } = await root.send<{targetInfos: any[]}>('Target.getTargets');
+  const { targetInfos } = await root.send<{targetInfos: any[]}>('Target.getTargets');
   
   const mainPages = targetInfos.filter(t => 
       t.type === 'page' && 
@@ -130,13 +166,19 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     });
   }
 
+  // 1. Инжектируем отключение анимаций на каждый новый документ (при навигации)
+  await session.send('Page.addScriptToEvaluateOnNewDocument', { source: ANTI_ANIMATION_SCRIPT });
+
   const keyboardScript = await getInjectScriptFromUrl(readInjectScriptConfig());
   if (keyboardScript) {
     await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
   }
 
+  // 2. Инжектируем отключение анимаций прямо сейчас, если страница уже загружена
+  await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
+
   await session.send('Page.startScreencast', {
-    format: 'png',
+    format: 'png', // На RPi4 JPEG может оказаться быстрее, если будет лагать, поменяйте на 'jpeg' и добавьте quality: 80
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
@@ -159,7 +201,6 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     url: '',
     lastActive: Date.now(),
     frameId: 0,
-    prevFrameHash: 0,
     processor,
     selfTestRunner: new SelfTestRunner(broadcaster),
     pendingB64: undefined,
@@ -180,13 +221,6 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     try {
       const pngFull = Buffer.from(b64, 'base64');
 
-      const h32 = hash32(pngFull);
-      if (dev.prevFrameHash === h32) {
-        dev.lastProcessedMs = Date.now();
-        return;
-      }
-      dev.prevFrameHash = h32;
-
       let img = sharp(pngFull);
       if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
 
@@ -194,7 +228,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
+        
       const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
+      
       if (out.rects.length > 0) {
         dev.frameId = (dev.frameId + 1) >>> 0;
         broadcaster.sendFrameChunked(id, out, dev.frameId, cfg.maxBytesPerMessage);
@@ -238,56 +274,37 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
         console.log(`[device] Detected HA login page. Injecting credentials via deep CDP...`);
 
-        // Ждем 5 секунд, пока HA полностью загрузится и поставит фокус в поле username
+        // Ждем 5 секунд, пока HA полностью загрузится
         setTimeout(async () => {
           console.log("[device] Starting xdotool-style CDP auto-login sequence...");
 
           try {
-            // Вспомогательная функция для эмуляции ввода текста
             const typeText = async (text: string) => {
               for (const char of text) {
-                await session.send('Input.dispatchKeyEvent', {
-                  type: 'char',
-                  text: char
-                });
-                await new Promise(r => setTimeout(r, 20)); // Небольшая пауза между символами
+                await session.send('Input.dispatchKeyEvent', { type: 'char', text: char });
+                await new Promise(r => setTimeout(r, 20));
               }
             };
 
-            // Вспомогательная функция для нажатия спецклавиш
             const pressKey = async (key: string, code: string, keyIdentifier: string) => {
-              await session.send('Input.dispatchKeyEvent', {
-                type: 'keyDown',
-                key: key,
-                code: code,
-                keyIdentifier: keyIdentifier
-              });
+              await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, keyIdentifier });
               await new Promise(r => setTimeout(r, 50));
-              await session.send('Input.dispatchKeyEvent', {
-                type: 'keyUp',
-                key: key,
-                code: code,
-                keyIdentifier: keyIdentifier
-              });
+              await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, keyIdentifier });
               await new Promise(r => setTimeout(r, 100));
             };
 
-            // Шаг 1: Печатаем логин (фокус уже там по умолчанию)
             console.log("[device] Typing username...");
             await typeText(cfg.haUser);
             await new Promise(r => setTimeout(r, 200));
 
-            // Шаг 2: Нажимаем Tab для перехода к паролю
             console.log("[device] Pressing Tab...");
             await pressKey('Tab', 'Tab', 'U+0009');
             await new Promise(r => setTimeout(r, 200));
 
-            // Шаг 3: Печатаем пароль
             console.log("[device] Typing password...");
             await typeText(cfg.haPass);
             await new Promise(r => setTimeout(r, 500));
 
-            // Шаг 4: Нажимаем Tab, чтобы перейти к кнопке "Войти" (Submit)
             console.log("[device] Pressing Tab to reach Submit button...");
             await pressKey('Tab', 'Tab', 'U+0009');
             await pressKey('Tab', 'Tab', 'U+0009');
@@ -295,18 +312,18 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
             await pressKey('Tab', 'Tab', 'U+0009');
             await new Promise(r => setTimeout(r, 300));
 
-            // Шаг 5: Нажимаем Enter (или Пробел) прямо на кнопке
             console.log("[device] Pressing Enter to submit...");
-            // Для кнопок Material Web Components (mwc-button) часто лучше работает пробел или явный keyDown на Enter
             await pressKey('Enter', 'Enter', 'Enter');
-            // На всякий случай дублируем пробелом, если кнопка не отреагировала на Enter
             await pressKey(' ', 'Space', 'U+0020'); 
 
             console.log("[device] Credentials injected via CDP keystrokes. Waiting for redirect...");
 
-            // Шаг 5: Перезапускаем скринкаст, так как страница должна обновиться
             setTimeout(async () => {
                 await session.send('Page.stopScreencast').catch(() => {});
+                
+                // 3. После логина принудительно гасим анимации еще раз (на случай, если HA отрендерил новый SPA-контекст)
+                await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
+
                 await session.send('Page.startScreencast', {
                   format: 'png',
                   maxWidth: cfg.width,
@@ -315,21 +332,19 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
                 }).catch(() => {});
 
                 newDevice.processor.requestFullFrame();
-            }, 5000); // Ждем 5 секунд на авторизацию и загрузку дашборда
+            }, 5000);
 
           } catch (e: any) {
             console.error(`[device] CDP xdotool-style login failed:`, e);
           }
-        }, 5000); // Ждем 5 секунд после начала загрузки URL
+        }, 5000); 
 
       }
       // ================= КОНЕЦ АВТОЛОГИНА =================
-
     }
   };
 
   session.on('Page.frameNavigated', (evt: any) => {
-    // Only track the main frame, ignore iframes
     if (!evt.frame.parentId) {
       handleNavigation(evt.frame.url);
     }

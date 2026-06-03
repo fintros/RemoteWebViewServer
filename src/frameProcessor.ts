@@ -1,9 +1,9 @@
 import os from "node:os";
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
-import { hash32 } from "./util.js";
 
-sharp.concurrency(Math.max(1, os.cpus().length - 2));
+// На Raspberry Pi 4 обычно 4 ядра. Оставляем 1 ядро системе/Node.js, остальные отдаем libvips
+sharp.concurrency(Math.max(1, os.cpus().length - 1));
 
 export type RGBA = { data: Buffer; width: number; height: number };
 
@@ -28,7 +28,8 @@ export class FrameProcessor {
   private _cfg: FrameProcessorCfg;
   private _cols = 0;
   private _rows = 0;
-  private _prev?: Uint32Array;
+  // Храним полный буфер предыдущего кадра для сверхбыстрого сравнения в памяти
+  private _prevData?: Buffer; 
   private _iter = 0;
   private _fullFrameRequested = false;
 
@@ -42,7 +43,10 @@ export class FrameProcessor {
   }
 
   public async processFrameAsync(rgba: RGBA): Promise<FrameOut> {
-    if (!this._prev) this._initGrid(rgba.width, rgba.height);
+    if (!this._prevData) {
+      this._cols = Math.ceil(rgba.width / this._cfg.tileSize);
+      this._rows = Math.ceil(rgba.height / this._cfg.tileSize);
+    }
 
     let forceFull = (this._iter % this._cfg.fullFrameEvery) === 0;
     if (this._fullFrameRequested) {
@@ -51,7 +55,7 @@ export class FrameProcessor {
     }
     const chosenEncoding: Encoding = Encoding.JPEG;
 
-    type TileInfo = { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean };
+    type TileInfo = { x: number; y: number; w: number; h: number; idx: number; changed: boolean };
     const tiles: TileInfo[] = [];
     let changedArea = 0;
 
@@ -62,13 +66,12 @@ export class FrameProcessor {
         const w = Math.min(this._cfg.tileSize, rgba.width - x);
         const h = Math.min(this._cfg.tileSize, rgba.height - y);
 
-        const raw = this._extractRaw(rgba, x, y, w, h);
-        const h32 = hash32(raw);
         const idx = ty * this._cols + tx;
-        const prev = this._prev![idx];
-        const changed = forceFull || (prev !== h32);
+        
+        // Быстрая проверка изменений в памяти без копирования и хеширования
+        const changed = forceFull || this._isTileChanged(rgba.data, this._prevData, rgba.width, x, y, w, h);
 
-        tiles.push({ x, y, w, h, idx, h32, changed });
+        tiles.push({ x, y, w, h, idx, changed });
         if (changed) changedArea += w * h;
       }
     }
@@ -79,7 +82,7 @@ export class FrameProcessor {
 
     let out: FrameOut;
     if (doFull) {
-      out = await this._processFullFrame(rgba, tiles, chosenEncoding);
+      out = await this._processFullFrame(rgba, chosenEncoding);
     } else {
       out = await this._processPartialFrame(rgba, tiles, chosenEncoding);
     }
@@ -93,45 +96,103 @@ export class FrameProcessor {
       }
     }
 
+    // Сохраняем копию текущего кадра для следующей итерации (работает мгновенно на уровне C++)
+    this._prevData = Buffer.from(rgba.data);
     this._iter++;
+    
     return out;
   }
 
-  private async _processFullFrame(
-    rgba: RGBA,
-    tilesInfo: { idx: number; h32: number }[],
-    encoding: Encoding
-  ): Promise<FrameOut> {
-    const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
-    const rects: Rect[] = [];
-
-    for (const r of rectsForFull) {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
-      rects.push({ x: r.x, y: r.y, w: r.w, h: r.h, data });
+  // Сверхбыстрое O(1) сравнение пикселей с использованием V8 Buffer.compare
+  private _isTileChanged(cur: Buffer, prev: Buffer | undefined, frameW: number, x: number, y: number, w: number, h: number): boolean {
+    if (!prev) return true;
+    for (let yy = 0; yy < h; yy++) {
+      const offset = ((y + yy) * frameW + x) * 4;
+      const rowLen = w * 4;
+      // subarray() не копирует данные, а создает view (указатель). compare() выполняется на C++
+      if (cur.subarray(offset, offset + rowLen).compare(prev.subarray(offset, offset + rowLen)) !== 0) {
+        return true;
+      }
     }
+    return false;
+  }
 
-    for (const t of tilesInfo) this._prev![t.idx] = t.h32;
+  private async _processFullFrame(rgba: RGBA, encoding: Encoding): Promise<FrameOut> {
+    const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
+    
+    // Выполняем кодирование тайлов ПАРАЛЛЕЛЬНО, утилизируя все ядра RPi
+    const rects = await Promise.all(rectsForFull.map(async (r) => {
+      const data = await this._encode(rgba, r.x, r.y, r.w, r.h, encoding);
+      return { x: r.x, y: r.y, w: r.w, h: r.h, data };
+    }));
 
     return { rects, isFullFrame: true, encoding };
   }
 
   private async _processPartialFrame(
     rgba: RGBA,
-    tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
+    tiles: { x: number; y: number; w: number; h: number; idx: number; changed: boolean }[],
     encoding: Encoding
   ): Promise<FrameOut> {
     const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height);
 
-    const out: Rect[] = [];
-    for (const r of mergedRects) {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
-      out.push({ ...r, data });
-    }
-    for (const t of tiles) if (t.changed) this._prev![t.idx] = t.h32;
+    // Выполняем кодирование измененных зон ПАРАЛЛЕЛЬНО
+    const outRects = await Promise.all(mergedRects.map(async (r) => {
+      const data = await this._encode(rgba, r.x, r.y, r.w, r.h, encoding);
+      return { ...r, data };
+    }));
 
-    return { rects: out, isFullFrame: false, encoding };
+    return { rects: outRects, isFullFrame: false, encoding };
+  }
+
+  // Единая точка входа для кодирования (Sharp берет на себя обрезку без аллокации JS буферов)
+  private async _encode(rgba: RGBA, x: number, y: number, w: number, h: number, enc: Encoding): Promise<Buffer> {
+    if (enc === Encoding.RAW565) {
+      return this._encodeRAW565(rgba, x, y, w, h);
+    }
+    return this._encodeJPEG(rgba, x, y, w, h);
+  }
+
+  private async _encodeJPEG(rgba: RGBA, x: number, y: number, w: number, h: number): Promise<Buffer> {
+    return sharp(rgba.data, { raw: { width: rgba.width, height: rgba.height, channels: 4 } })
+      .extract({ left: x, top: y, width: w, height: h }) // Обрезка на стороне libvips (С++)
+      .jpeg({ 
+        quality: this._cfg.jpegQuality, 
+        mozjpeg: false, // Обязательно false для Raspberry Pi (ускоряет x2-x3)
+        chromaSubsampling: "4:2:0" 
+      })
+      .toBuffer();
+  }
+
+  private _encodeRAW565(rgba: RGBA, x: number, y: number, w: number, h: number): Buffer {
+    const out = Buffer.allocUnsafe(w * h * 2);
+    // Для RAW-формата извлекаем и конвертируем напрямую из большого буфера
+    for (let yy = 0; yy < h; yy++) {
+      const srcRowOffset = ((y + yy) * rgba.width + x) * 4;
+      const dstRowOffset = yy * w * 2;
+      for (let xx = 0; xx < w; xx++) {
+        const srcIdx = srcRowOffset + xx * 4;
+        const dstIdx = dstRowOffset + xx * 2;
+        const r = rgba.data[srcIdx];
+        const g = rgba.data[srcIdx + 1];
+        const b = rgba.data[srcIdx + 2];
+        const v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        out[dstIdx] = v & 0xFF;
+        out[dstIdx + 1] = (v >> 8) & 0xFF;
+      }
+    }
+    return out;
+  }
+
+  private async _makeRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
+    const raw = Buffer.allocUnsafe(w * h * 4);
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const RGBA_RED = 0xFF0000FF; // bytes: FF 00 00 FF
+    for (let o = 0; o < raw.length; o += 4) view.setUint32(o, RGBA_RED, true);
+    
+    // Эмулируем структуру RGBA для переиспользования пайплайна
+    const dummyRgba: RGBA = { data: raw, width: w, height: h };
+    return this._encode(dummyRgba, 0, 0, w, h, enc);
   }
 
   private _splitWholeFrame(w: number, h: number, n: number): { x: number; y: number; w: number; h: number }[] {
@@ -212,7 +273,7 @@ export class FrameProcessor {
   }
 
   private _mergeChangedTiles(
-    tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
+    tiles: { x: number; y: number; w: number; h: number; idx: number; changed: boolean }[],
     frameW: number,
     frameH: number
   ): { x: number; y: number; w: number; h: number }[] {
@@ -235,7 +296,6 @@ export class FrameProcessor {
       for (let c = 0; c < cols; c++) {
         if (!changed[r][c] || visited[r][c]) continue;
 
-        // grow horizontally
         let wTiles = 0, pxW = 0;
         while (c + wTiles < cols && changed[r][c + wTiles] && !visited[r][c + wTiles]) {
           const nextW = pxW + widths[c + wTiles];
@@ -244,7 +304,6 @@ export class FrameProcessor {
           wTiles++;
         }
 
-        // grow vertically
         let hTiles = 1, pxH = heights[r];
         let canGrow = true;
         while (canGrow && (r + hTiles) < rows) {
@@ -269,59 +328,5 @@ export class FrameProcessor {
     }
 
     return rects;
-  }
-
-  private _initGrid(w: number, h: number) {
-    this._cols = Math.ceil(w / this._cfg.tileSize);
-    this._rows = Math.ceil(h / this._cfg.tileSize);
-    this._prev = new Uint32Array(this._cols * this._rows);
-  }
-
-  private _extractRaw(rgba: RGBA, x: number, y: number, w: number, h: number): Buffer {
-    const out = Buffer.allocUnsafe(w * h * 4);
-    for (let yy = 0; yy < h; yy++) {
-      const src = ((y + yy) * rgba.width + x) * 4;
-      rgba.data.copy(out, yy * w * 4, src, src + w * 4);
-    }
-    return out;
-  }
-
-  private async _encode(rawRgba: Buffer, w: number, h: number, enc: Encoding): Promise<Buffer> {
-    switch (enc) {
-      case Encoding.JPEG:
-        return this._encodeJPEG(rawRgba, w, h);
-      case Encoding.RAW565:
-        return this._encodeRAW565(rawRgba);
-      default:
-        return this._encodeJPEG(rawRgba, w, h);
-    }
-  }
-
-  private async _encodeJPEG(rawRgba: Buffer, w: number, h: number): Promise<Buffer> {
-    return sharp(rawRgba, { raw: { width: w, height: h, channels: 4 } })
-      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
-      .toBuffer();
-  }
-
-  private _encodeRAW565(rawRgba: Buffer): Buffer {
-    const pxCount = rawRgba.length >> 2;
-    const out = Buffer.allocUnsafe(pxCount * 2);
-    for (let i = 0, j = 0; i < pxCount; i++, j += 4) {
-      const r = rawRgba[j];
-      const g = rawRgba[j + 1];
-      const b = rawRgba[j + 2];
-      const v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-      out[i * 2] = v & 0xFF;
-      out[i * 2 + 1] = (v >> 8) & 0xFF;
-    }
-    return out;
-  }
-
-  private async _makeRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
-    const raw = Buffer.allocUnsafe(w * h * 4);
-    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    const RGBA_RED = 0xFF0000FF; // bytes: FF 00 00 FF
-    for (let o = 0; o < raw.length; o += 4) view.setUint32(o, RGBA_RED, true);
-    return this._encode(raw, w, h, enc);
   }
 }
