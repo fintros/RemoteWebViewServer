@@ -69,7 +69,7 @@ export class FrameProcessor {
         const idx = ty * this._cols + tx;
         
         // Быстрая проверка изменений в памяти без копирования и хеширования
-        const changed = forceFull || this._isTileChangedFuzzy(rgba.data, this._prevData, rgba.width, x, y, w, h);
+        const changed = forceFull || this._isTileChanged(rgba.data, this._prevData, rgba.width, x, y, w, h);
 
         tiles.push({ x, y, w, h, idx, changed });
         if (changed) changedArea += w * h;
@@ -107,11 +107,12 @@ export class FrameProcessor {
   private _isTileChangedFuzzy(cur: Buffer, prev: Buffer | undefined, frameW: number, x: number, y: number, w: number, h: number): boolean {
     if (!prev) return true;
     const THRESHOLD = 10; // Допуск на JPEG-шум
-    const STRIDE = 4; // Проверяем каждый 4-й пиксель (сверхбыстро)
+    const STRIDE_X = 8;
+    const STRIDE_Y = 4; 
 
-    for (let yy = 0; yy < h; yy += 2) { // Проверяем каждую 2-ю строку
+    for (let yy = 0; yy < h; yy += STRIDE_Y) {
       const offset = ((y + yy) * frameW + x) * 4;
-      for (let xx = 0; xx < w * 4; xx += STRIDE * 4) {
+      for (let xx = 0; xx < w * 4; xx += STRIDE_X * 4) {
         const idx = offset + xx;
         // Сравниваем R, G и B с допуском
         if (Math.abs(cur[idx] - prev[idx]) > THRESHOLD ||
