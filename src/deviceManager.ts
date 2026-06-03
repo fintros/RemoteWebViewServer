@@ -95,7 +95,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       device.processor.requestFullFrame();
       
       await device.cdp.send('Page.startScreencast', {
-        format: 'png', // Если процессор успевает, иначе 'jpeg'
+        format: 'jpeg',
+        quality: 80,
         maxWidth: cfg.width,
         maxHeight: cfg.height,
         everyNthFrame: cfg.everyNthFrame
@@ -178,7 +179,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
 
   await session.send('Page.startScreencast', {
-    format: 'png', // На RPi4 JPEG может оказаться быстрее, если будет лагать, поменяйте на 'jpeg' и добавьте quality: 80
+    format: 'jpeg',
+    quality: 80,
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
@@ -325,7 +327,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
                 await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
 
                 await session.send('Page.startScreencast', {
-                  format: 'png',
+                  format: 'jpeg',
+                  quality: 80,
                   maxWidth: cfg.width,
                   maxHeight: cfg.height,
                   everyNthFrame: cfg.everyNthFrame
