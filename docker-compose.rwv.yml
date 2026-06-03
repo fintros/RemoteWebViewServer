@@ -1,18 +1,18 @@
 services:
-  rwvserver:
-    build: ./RemoteWebViewServer
-    image: remote-webview-server:latest
-    container_name: remote-webview-server
+  crow_ws_server:
+    build: ./CrowWSServer
+    image: crow-ws-server:latest
+    container_name: crow-ws-server
     restart: unless-stopped
     environment:
-      TILE_SIZE: 32
+      TILE_SIZE: 256
       FULL_FRAME_TILE_COUNT: 4
       FULL_FRAME_AREA_THRESHOLD: 0.5
       FULL_FRAME_EVERY: 50
       EVERY_NTH_FRAME: 1
       MIN_FRAME_INTERVAL_MS: 80
       JPEG_QUALITY: 85
-      MAX_BYTES_PER_MESSAGE: 14336
+      MAX_BYTES_PER_MESSAGE: 122880
       WS_PORT: 8081
       DEBUG_PORT: 9221 # internal debug port
       HEALTH_PORT: 18080
@@ -42,11 +42,11 @@ services:
 
   debug-proxy:
     image: alpine/socat
-    container_name: remote-webview-server-debug
+    container_name: crow-ws-server-debug
     restart: unless-stopped
-    network_mode: "service:rwvserver"
+    network_mode: "service:crow_ws_server"
     depends_on:
-      rwvserver:
+      crow_ws_server:
         condition: service_healthy
     command:
     - "-d"
