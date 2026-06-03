@@ -95,8 +95,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       device.processor.requestFullFrame();
       
       await device.cdp.send('Page.startScreencast', {
-        format: 'jpeg',
-        quality: 80,
+        format: 'png',
         maxWidth: cfg.width,
         maxHeight: cfg.height,
         everyNthFrame: cfg.everyNthFrame
@@ -179,8 +178,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
 
   await session.send('Page.startScreencast', {
-    format: 'jpeg',
-    quality: 80,
+    format: 'png',
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
@@ -327,8 +325,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
                 await session.send('Runtime.evaluate', { expression: ANTI_ANIMATION_SCRIPT }).catch(() => {});
 
                 await session.send('Page.startScreencast', {
-                  format: 'jpeg',
-                  quality: 80,
+                  format: 'png',
                   maxWidth: cfg.width,
                   maxHeight: cfg.height,
                   everyNthFrame: cfg.everyNthFrame
